@@ -1,5 +1,6 @@
 from machine import UART
 from machine import Pin
+from machine import Timer
 from umqtt import MQTTClient
 import dataCall
 import cellLocator
@@ -23,9 +24,12 @@ device_address = 0x01
 msg_id = 0
 state = 0
 mqtt_sub_msg = {}
+time_interval = 8 * 3600 * 1000
 
-log.basicConfig(level=log.DEBUG)
+log.basicConfig(level=log.INFO)
 app_log = log.getLogger("app_log")
+
+t = Timer(Timer.Timer1)
 
 
 def watch_dog_task():
@@ -198,7 +202,6 @@ class ModbusRTU:
     def __init__(self, device_address):
         self.device_address = device_address
         self.distance = 0
-        self.time_interval = 8
 
     def calculate_crc(self, data):
         crc = 0xFFFF
@@ -265,6 +268,7 @@ class ModbusRTU:
                 crc_received, crc_calculated))
         elif function_code == 0x83:
             app_log.error("measure error: value1=0x{:02X}".format(value1))
+            modbus_rtu.query_single_measure()
         elif function_code == 0x03 and value1 == 0x0000 and value2 == 0x0000:
             app_log.error(
                 "measure failure: value1=0x{:04X}, value2=0x{:04X}".format(value1, value2))
@@ -272,7 +276,7 @@ class ModbusRTU:
             app_log.debug(
                 "measure successful: value1=0x{:04X}, value2=0x{:04X}".format(value1, value2))
             self.distance = ((value1 << 16) + value2)/1000
-            app_log.debug("distance: {}".format(self.distance))
+            app_log.info("distance: {}".format(self.distance))
             msg_id += 1
             mqtt_client.publish(property_publish_topic.encode(
                 'utf-8'), msg_distance.format(msg_id, modbus_rtu.distance).encode('utf-8'))
@@ -319,15 +323,35 @@ def sim_task():
         utime.sleep(7200)
 
 
-def timing_task():
-    while True:
-        modbus_rtu.query_single_measure()
-        app_log.debug("time_interval: {}".format(modbus_rtu.time_interval))
-        utime.sleep(modbus_rtu.time_interval * 60 * 60)
+def timing_task(args):
+    modbus_rtu.query_single_measure()
+    app_log.debug("time_interval: {}".format(time_interval))
+
+
+def update_time_interval(new_time_interval):
+    global time_interval
+    global t
+
+    if new_time_interval != time_interval:
+        app_log.info(
+            "Updating interval to {} seconds".format(new_time_interval))
+        time_interval = new_time_interval
+        t.stop()
+        t.start(period=int(time_interval),
+                mode=t.PERIODIC, callback=timing_task)
+
+
+def mqtt_sub_cb(topic, msg):
+    global state, mqtt_sub_msg
+    app_log.info("Subscribe Recv: Topic={},Msg={}".format(
+        topic.decode(), msg.decode()))
+    mqtt_sub_msg = ujson.loads(msg.decode())
+    state = 1
+    app_log.debug(mqtt_sub_msg['params'])
 
 
 def process_relay_logic():
-    global state, msg_id, mqtt_sub_msg
+    global state, msg_id, mqtt_sub_msg, time_interval
 
     if 'method' not in mqtt_sub_msg:
         app_log.error('method is missing')
@@ -354,22 +378,14 @@ def process_relay_logic():
     elif not mqtt_sub_msg['params']:
         app_log.error('params is empty')
     elif 'set_time_interval' in mqtt_sub_msg['params']:
-        modbus_rtu.time_interval = mqtt_sub_msg['params']['set_time_interval']
+        update_time_interval(
+            mqtt_sub_msg['params']['set_time_interval'] * 3600 * 1000)
         msg_id += 1
         mqtt_client.publish(property_publish_topic.encode(
-            'utf-8'), msg_time_interval.format(msg_id, modbus_rtu.time_interval).encode('utf-8'))
+            'utf-8'), msg_time_interval.format(msg_id, time_interval / 3600000).encode('utf-8'))
 
     state = 0
     mqtt_sub_msg = {}
-
-
-def mqtt_sub_cb(topic, msg):
-    global state, mqtt_sub_msg
-    app_log.info("Subscribe Recv: Topic={},Msg={}".format(
-        topic.decode(), msg.decode()))
-    mqtt_sub_msg = ujson.loads(msg.decode())
-    state = 1
-    app_log.debug(mqtt_sub_msg['params'])
 
 
 if __name__ == '__main__':
@@ -384,6 +400,8 @@ if __name__ == '__main__':
         uart_inst.set_modbus_rtu_instance(modbus_rtu)
 
         _thread.start_new_thread(watch_dog_task, ())
+        t.start(period=int(time_interval),
+                mode=t.PERIODIC, callback=timing_task)
 
         msg_cellLocator = """{{
                         "id": "{0}",
@@ -498,7 +516,6 @@ if __name__ == '__main__':
 
         _thread.start_new_thread(cell_location_task, ())
         _thread.start_new_thread(sim_task, ())
-        _thread.start_new_thread(timing_task, ())
 
         while True:
             if state == 1:
