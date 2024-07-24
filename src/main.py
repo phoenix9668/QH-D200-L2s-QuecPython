@@ -15,7 +15,7 @@ import ujson
 Work_Led = Pin(Pin.GPIO12, Pin.OUT, Pin.PULL_DISABLE, 1)
 
 PROJECT_NAME = "QuecPython_EC600U"
-PROJECT_VERSION = "1.0.0"
+PROJECT_VERSION = "1.0.2"
 
 checknet = checkNet.CheckNetwork(PROJECT_NAME, PROJECT_VERSION)
 TaskEnable = True  # 调用disconnect后会通过该状态回收线程资源
@@ -198,6 +198,7 @@ class ModbusRTU:
     def __init__(self, device_address):
         self.device_address = device_address
         self.distance = 0
+        self.time_interval = 8
 
     def calculate_crc(self, data):
         crc = 0xFFFF
@@ -221,8 +222,8 @@ class ModbusRTU:
         # 计算 CRC 校验码
         crc = self.calculate_crc(message)
         crc_bytes = ustruct.pack('<H', crc)
-        app_log.debug("build_message:{}".format(
-            ['0x{:02X}'.format(b) for b in (message + crc_bytes)]))
+        # app_log.debug("build_message:{}".format(
+        #     ['0x{:02X}'.format(b) for b in (message + crc_bytes)]))
         return message + crc_bytes
 
     def build_stop_message(self, device_address, function_code, reg_address, reg_number, reg_value1, reg_value2):
@@ -232,8 +233,8 @@ class ModbusRTU:
         # 计算 CRC 校验码
         crc = self.calculate_crc(message)
         crc_bytes = ustruct.pack('<H', crc)
-        app_log.debug("build_message:{}".format(
-            ['0x{:02X}'.format(b) for b in (message + crc_bytes)]))
+        # app_log.debug("build_message:{}".format(
+        #     ['0x{:02X}'.format(b) for b in (message + crc_bytes)]))
         return message + crc_bytes
 
     def send_message(self, message, timeout=50):
@@ -242,14 +243,17 @@ class ModbusRTU:
 
     def handle_response(self, data):
         global msg_id
-        if len(data) < 8:
+        if len(data) < 5 or len(data) == 6 or len(data) == 7:
             app_log.error("Invalid response length")
             return
+        elif len(data) == 5:
+            address, function_code, value1, crc_received = ustruct.unpack(
+                '>BBBH', data)
         elif len(data) == 8:
             address, function_code, value1, value2, crc_received = ustruct.unpack(
                 '>BBHHH', data)
         elif len(data) == 9:
-            address, function_code, bytes_num, distance_value1, distance_value2, crc_received = ustruct.unpack(
+            address, function_code, bytes_num, value1, value2, crc_received = ustruct.unpack(
                 '>BBBHHH', data)
         else:
             app_log.error("The data is linked together")
@@ -259,13 +263,15 @@ class ModbusRTU:
         if crc_received != crc_calculated_swapped:
             app_log.error("CRC mismatch: received=0x{:04X}, calculated=0x{:04X}".format(
                 crc_received, crc_calculated))
-        elif distance_value1 == 0x0000 and distance_value2 == 0x0000:
-            app_log.error("measure failure: bytes_num=0x{:02X}, distance_value1=0x{:04X}, distance_value2=0x{:04X}".format(
-                bytes_num, distance_value1, distance_value2))
-        elif function_code == 0x03 and bytes_num == 0x04 and (distance_value1 != 0x0000 or distance_value2 != 0x0000):
-            app_log.debug("measure successful: bytes_num=0x{:02X}, distance_value1=0x{:04X}, distance_value2=0x{:04X}".format(
-                bytes_num, distance_value1, distance_value2))
-            self.distance = ((distance_value1 << 16) + distance_value2)/1000
+        elif function_code == 0x83:
+            app_log.error("measure error: value1=0x{:02X}".format(value1))
+        elif function_code == 0x03 and value1 == 0x0000 and value2 == 0x0000:
+            app_log.error(
+                "measure failure: value1=0x{:04X}, value2=0x{:04X}".format(value1, value2))
+        elif function_code == 0x03 and (value1 != 0x0000 or value2 != 0x0000):
+            app_log.debug(
+                "measure successful: value1=0x{:04X}, value2=0x{:04X}".format(value1, value2))
+            self.distance = ((value1 << 16) + value2)/1000
             app_log.debug("distance: {}".format(self.distance))
             msg_id += 1
             mqtt_client.publish(property_publish_topic.encode(
@@ -313,17 +319,45 @@ def sim_task():
         utime.sleep(7200)
 
 
+def timing_task():
+    while True:
+        modbus_rtu.query_single_measure()
+        app_log.debug("time_interval: {}".format(modbus_rtu.time_interval))
+        utime.sleep(modbus_rtu.time_interval * 60 * 60)
+
+
 def process_relay_logic():
     global state, msg_id, mqtt_sub_msg
 
-    if not mqtt_sub_msg['method']:
+    if 'method' not in mqtt_sub_msg:
+        app_log.error('method is missing')
+    elif not mqtt_sub_msg['method']:
         app_log.error('method is empty')
     elif 'thing.service.single_measure' in mqtt_sub_msg['method']:
         modbus_rtu.query_single_measure()
+        state = 0
+        mqtt_sub_msg = {}
+        return
     elif 'thing.service.auto_measure' in mqtt_sub_msg['method']:
         modbus_rtu.query_auto_measure()
+        state = 0
+        mqtt_sub_msg = {}
+        return
     elif 'thing.service.stop_measure' in mqtt_sub_msg['method']:
         modbus_rtu.query_stop_measure()
+        state = 0
+        mqtt_sub_msg = {}
+        return
+
+    if 'params' not in mqtt_sub_msg:
+        app_log.error('params is missing')
+    elif not mqtt_sub_msg['params']:
+        app_log.error('params is empty')
+    elif 'set_time_interval' in mqtt_sub_msg['params']:
+        modbus_rtu.time_interval = mqtt_sub_msg['params']['set_time_interval']
+        msg_id += 1
+        mqtt_client.publish(property_publish_topic.encode(
+            'utf-8'), msg_time_interval.format(msg_id, modbus_rtu.time_interval).encode('utf-8'))
 
     state = 0
     mqtt_sub_msg = {}
@@ -355,14 +389,14 @@ if __name__ == '__main__':
                         "id": "{0}",
                         "version": "1.0",
                         "params": {{
-                            "CellLocator": {{
-                                "Longitude": {{
+                            "cell_locator": {{
+                                "longitude": {{
                                     "value": {1}
                                 }},
-                                "Latitude": {{
+                                "latitude": {{
                                     "value": {2}
                                 }},
-                                "Accuracy": {{
+                                "accuracy": {{
                                 "value": {3}
                                 }}
                             }}
@@ -388,11 +422,11 @@ if __name__ == '__main__':
                                         "id": "{0}",
                                         "version": "1.0",
                                         "params": {{
-                                            "NetStatus": {{
-                                                "StageCode": {{
+                                            "net_status": {{
+                                                "stage_code": {{
                                                     "value": "{1}"
                                                 }},
-                                                "SubCode": {{
+                                                "sub_code": {{
                                                     "value": "{2}"
                                                 }}
                                             }}
@@ -411,24 +445,31 @@ if __name__ == '__main__':
                                 "method": "thing.event.property.post"
                              }}"""
 
-        ProductKey = "k1l5lUEj1w2"  # 产品标识
-        DeviceName = "rongcheng6"  # 设备名称
+        msg_time_interval = """{{
+                                "id": "{0}",
+                                "version": "1.0",
+                                "params": {{
+                                    "set_time_interval": {{
+                                        "value": {1}
+                                    }}
+                                }},
+                                "method": "thing.event.property.post"
+                             }}"""
 
-        property_subscribe_topic1 = "/sys" + "/" + ProductKey + "/" + \
-            DeviceName + "/" + "thing/service/single_measure"
-        property_subscribe_topic2 = "/sys" + "/" + ProductKey + "/" + \
-            DeviceName + "/" + "thing/service/auto_measure"
-        property_subscribe_topic3 = "/sys" + "/" + ProductKey + "/" + \
-            DeviceName + "/" + "thing/service/stop_measure"
+        ProductKey = "k12xgqCNomb"  # 产品标识
+        DeviceName = "L2s-001"  # 设备名称
+
+        property_subscribe_topic = "/sys" + "/" + ProductKey + "/" + \
+            DeviceName + "/" + "thing/service/property/set"
         property_publish_topic = "/sys" + "/" + ProductKey + "/" + \
             DeviceName + "/" + "thing/event/property/post"
 
         # 创建一个mqtt实例
-        mqtt_client = MqttClient(clientid="k1l5lUEj1w2.rongcheng6|securemode=2,signmethod=hmacsha256,timestamp=1721203148984|",
-                                 server="iot-06z00euenm9nvs7.mqtt.iothub.aliyuncs.com",
+        mqtt_client = MqttClient(clientid="k12xgqCNomb.L2s-001|securemode=2,signmethod=hmacsha256,timestamp=1721701315215|",
+                                 server="iot-06z00eu1sc0k51m.mqtt.iothub.aliyuncs.com",
                                  port=1883,
-                                 user="rongcheng6&k1l5lUEj1w2",
-                                 password="702d9f9459d5b9220d09a2b855b8cb6e1391bd62658727c8c639937fbe38fa09",
+                                 user="L2s-001&k12xgqCNomb",
+                                 password="658be3c854c2aa67a3cc29d6cc932bb01e0c4af5a553913fc5d38a47c938b020",
                                  keepalive=60, reconn=False)
 
         def mqtt_err_cb(err):
@@ -446,14 +487,8 @@ if __name__ == '__main__':
 
         # 订阅主题
         app_log.info(
-            "Connected to aliyun, subscribed to: {}".format(property_subscribe_topic1))
-        mqtt_client.subscribe(property_subscribe_topic1.encode('utf-8'), qos=0)
-        app_log.info(
-            "Connected to aliyun, subscribed to: {}".format(property_subscribe_topic2))
-        mqtt_client.subscribe(property_subscribe_topic2.encode('utf-8'), qos=0)
-        app_log.info(
-            "Connected to aliyun, subscribed to: {}".format(property_subscribe_topic3))
-        mqtt_client.subscribe(property_subscribe_topic3.encode('utf-8'), qos=0)
+            "Connected to aliyun, subscribed to: {}".format(property_subscribe_topic))
+        mqtt_client.subscribe(property_subscribe_topic.encode('utf-8'), qos=0)
 
         msg_id += 1
         mqtt_client.publish(property_publish_topic.encode(
@@ -463,6 +498,7 @@ if __name__ == '__main__':
 
         _thread.start_new_thread(cell_location_task, ())
         _thread.start_new_thread(sim_task, ())
+        _thread.start_new_thread(timing_task, ())
 
         while True:
             if state == 1:
