@@ -24,7 +24,7 @@ device_address = 0x01
 msg_id = 0
 state = 0
 mqtt_sub_msg = {}
-time_interval = 8 * 3600 * 1000
+time_interval = 1 * 3600 * 1000
 
 log.basicConfig(level=log.INFO)
 app_log = log.getLogger("app_log")
@@ -474,8 +474,9 @@ if __name__ == '__main__':
                                 "method": "thing.event.property.post"
                              }}"""
 
-        ProductKey = "k12xgqCNomb"  # 产品标识
-        DeviceName = "L2s-001"  # 设备名称
+        ProductKey = "k1l5lUEj1w2"  # 产品标识
+        # DeviceName = "rongcheng6"  # 设备名称
+        DeviceName = "rongcheng7"  # 设备名称
 
         property_subscribe_topic = "/sys" + "/" + ProductKey + "/" + \
             DeviceName + "/" + "thing/service/property/set"
@@ -483,11 +484,18 @@ if __name__ == '__main__':
             DeviceName + "/" + "thing/event/property/post"
 
         # 创建一个mqtt实例
-        mqtt_client = MqttClient(clientid="k12xgqCNomb.L2s-001|securemode=2,signmethod=hmacsha256,timestamp=1721701315215|",
-                                 server="iot-06z00eu1sc0k51m.mqtt.iothub.aliyuncs.com",
+        # mqtt_client = MqttClient(clientid="k1l5lUEj1w2.rongcheng6|securemode=2,signmethod=hmacsha256,timestamp=1721963082509|",
+        #                          server="iot-06z00euenm9nvs7.mqtt.iothub.aliyuncs.com",
+        #                          port=1883,
+        #                          user="rongcheng6&k1l5lUEj1w2",
+        #                          password="e403ee716bc93ea25a528a3b47d951b45d11bab0ce9e3abc6572327ab15e5b94",
+        #                          keepalive=60, reconn=False)
+
+        mqtt_client = MqttClient(clientid="k1l5lUEj1w2.rongcheng7|securemode=2,signmethod=hmacsha256,timestamp=1721963768426|",
+                                 server="iot-06z00euenm9nvs7.mqtt.iothub.aliyuncs.com",
                                  port=1883,
-                                 user="L2s-001&k12xgqCNomb",
-                                 password="658be3c854c2aa67a3cc29d6cc932bb01e0c4af5a553913fc5d38a47c938b020",
+                                 user="rongcheng7&k1l5lUEj1w2",
+                                 password="90997217795c696df502efa1657c9bd091bb1c876c16aa61bd825a2f1db2f1d2",
                                  keepalive=60, reconn=False)
 
         def mqtt_err_cb(err):
